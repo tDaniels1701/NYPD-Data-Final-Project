@@ -1,0 +1,174 @@
+---
+title: "NYPD Shooting Incident Data Analysis"
+author: "NA"
+date: "2023-01-27"
+output:
+  html_document: default
+  pdf_document: default
+---
+Make sure to install packages tidyverse, ggplot2, randomForest and ROCR before running document.
+
+```{r setup, include=FALSE}
+library('tidyverse')
+library('ggplot2')
+library('randomForest')
+library('ROCR')
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading NYPD Shooting Incident Data (Historic) from https://catalog.data.gov/dataset. Empty or blank data has been filled with NA, Dropped columns for the purpose of this analysis were Incident_Key OCCUR_TIME, PRECINCT, JURISDICTION, LOCATION, X_COORD_CD, Y_COORD_CD, Latitude, Longitude, and Lon_Lat. 
+
+```{r Load Data: NYPD Shooting Incidents, message=FALSE, warning=FALSE}
+nypd_Data <- read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv", na.strings = "")
+head(nypd_Data)
+nypd_Data <- nypd_Data[, c(-1,-3,-5,-6,-7,-15,-16,-17,-18,-19)]
+head(nypd_Data)
+```
+
+There's quite a bit of missing data from this set spanning 16 years, first we will change the OCCUR_DATE column to a date variable, all other variables are change to factor variables. There's a couple strange values in PERP_AGE_GROUP 1020, 224, and 940. None of these values are remotly close to the other levels for that variable, could be a entry error. Those observations were dropped. Only complete entries were kept from this set. Strangely, the age groups for both perpetrator and victims have unequal age groups except for 25-44 and 45-64.  
+
+```{r Cleaning and Initial Analysis, echo=FALSE, message=FALSE, warning=FALSE}
+data <- nypd_Data %>%
+   mutate(OCCUR_DATE=as.Date(OCCUR_DATE, format = "%m/%d/%Y"))
+data['OCCUR_Year']<- as.factor(lubridate::year(data$OCCUR_DATE))
+data[,c(2,3,4,5,6,7,8,9)] <- lapply(data[,c(2,3,4,5,6,7,8,9)],factor)
+missing_data <- data[!complete.cases(data),]
+data <- subset(data,  PERP_AGE_GROUP!= c("1020","224","940"))
+data <- subset(data,  PERP_AGE_GROUP!= "1020")
+data <- subset(data,  PERP_AGE_GROUP!= "940")
+print('Missing Data:')
+head(missing_data)
+data <- na.omit(data)
+print('Data for Analysis:')
+head(data)
+summary(data)
+
+```
+
+From the initial 25596 observtions we are left with a new data matrix with 16249 observations or analysis. But what is going on with the observations that had missing data? Let's take a quick look.
+
+
+```{r Missing Data Analysis, echo=FALSE, message=FALSE, warning=FALSE}
+summary(missing_data)
+missing_data['NA Count'] <- rowSums(is.na(missing_data))
+problem <- group_by(missing_data, BORO) %>% summarise(total_NA = sum(`NA Count`))
+problem
+```
+Brooklyn and the Bronx have the most missing values of the New York city districts. These districts also have the most incidents from our analysis data. There could be an issue with the rate of these occurances and the documenting process. Or maybe a new entry system was introduced at some point. I could have filled the NAs with the "mean" of the variable columns, however because of what this data describes it is best not to speculate and skew the data further into various sub groups. 
+
+Let's take a visual look at the data we will use for our analysis, specifically those incidents that resulted in murder. 
+
+```{r Data Visualizations, echo=FALSE, message=FALSE, warning=FALSE, fig.align = "center",out.width = '70%'}
+year_BORO <- group_by(data[data$STATISTICAL_MURDER_FLAG == "true",], BORO) %>% count(BORO)
+print(year_BORO)
+ggplot(data[data$STATISTICAL_MURDER_FLAG == "true",], aes(PERP_RACE, BORO)) + geom_bin2d() +
+  theme(axis.text.x=element_text(angle=0,hjust=.75)) +
+  scale_x_discrete(labels=function(PERP_RACE) stringr::str_wrap(PERP_RACE, width=5)) + ggtitle('Murder Counts by District and Perpetrator Race') + xlab('Perpetrator Race') + ylab('District')
+ggplot(data[data$STATISTICAL_MURDER_FLAG == "true",], aes(PERP_RACE, VIC_RACE)) + geom_bin2d(binwidth=35)+
+  theme(axis.text.x=element_text(angle=0,hjust=.6)) +
+  scale_x_discrete(labels=function(PERP_RACE) stringr::str_wrap(PERP_RACE, width=3))+ ggtitle('Murder Counts by Victim Race and Perpetrator Race') + xlab('Perpetrator Race') + ylab('Victim Race')
+ggplot(data[data$STATISTICAL_MURDER_FLAG == "true",], aes(PERP_AGE_GROUP, as.factor(OCCUR_Year))) + geom_bin2d(binwidth=35) +
+  theme(axis.text.x=element_text(angle=0,hjust=.5))+
+  scale_x_discrete(labels=function(PERP_AGE_GROUP) stringr::str_wrap(PERP_AGE_GROUP, width=3))+ ggtitle('Murder Counts by Year and Perpetrator Age Group') + xlab('Year') + ylab('Perpetrator Age Group')
+year <- as.data.frame(summary(data$OCCUR_Year), col.names="count")
+year_race <- group_by(data[data$STATISTICAL_MURDER_FLAG == "true",], OCCUR_Year) %>% count(PERP_RACE)
+
+year_Murder <- group_by(data, OCCUR_Year) %>% count(STATISTICAL_MURDER_FLAG)
+
+ggplot(data=NULL, aes(year_race$OCCUR_Year,year_race$n, group=year_race$PERP_RACE), col=year_race$PERP_RACE) + geom_line(aes(linetype="solid", color=factor(year_race$PERP_RACE))) + geom_point(aes(colour=factor(year_race$PERP_RACE)))+ ggtitle('Murder Counts Through the Years by Perpetrator Race') + xlab('Year') + ylab('Murder Counts')+ labs(col = "Perpetrator Race") +guides(linetype = "none")
+ggplot(data=NULL, aes(year_Murder$OCCUR_Year ,year_Murder$n, group=year_Murder$STATISTICAL_MURDER_FLAG)) + geom_line(aes(linetype="solid", color=factor(year_Murder$STATISTICAL_MURDER_FLAG))) + geom_point(aes(colour=factor(year_Murder$STATISTICAL_MURDER_FLAG))) + ggtitle('Murder and Incident Counts Through the Years') + xlab('Year') + ylab('Murder and Incident Counts')+ labs(col = "Incident Resulted in Murder") + guides(linetype = "none")
+```
+
+
+
+Looking at these visualizations, Brooklyn appears to have the most murder recordings out of the districts. Of the recorder murder incidents Black on Black killings are the most occuring. Young adults and Adults have the most murder counts through the years. Chronologically Blacks have consistently held higher murder rates than other race groups. Wholistically shooting incidents that did not result in murder far exceed those that did. There is an incident spike during the financil crisis and during the COVID years.
+
+
+Let's see if we can classify if an incident will result in a murder based on the variables we have. 
+First we will try Logistic Regression and then Random Forest, after training and testing these models we will compare them at the end. 
+
+We will randomly split our data 70% for training and 30% for testing. 
+
+```{r Model Creation and Training: Logistic Regression, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(1)
+#Use 70% of dataset as training set and remaining 30% as testing set
+sample <- sample(c(TRUE, FALSE), nrow(data), replace=TRUE, prob=c(0.7,0.3))
+train <- data[sample, ]
+test <- data[!sample, ] 
+model <- glm(STATISTICAL_MURDER_FLAG ~ ., train[,-1], family= binomial(link= 'logit') )
+summary(model)
+summary(as.factor(round(model$fitted.values, digit=0)))
+murder <- ifelse(train$STATISTICAL_MURDER_FLAG=="true",1,0)
+mean(as.factor(round(model$fitted.values, digit=0)) == murder)
+```
+From this Logistic Rgression model we have an accuracy of 79.97%, not too bad for an initial attempt. I can say that ths data has definite issues with varability (By truth or lack of documentation and entry). Several groups are very prominent, which may or may not be an accurate representation of  the incidents occuring in these Districts and the whole of New York City. A comparison to the demographics of New York City through the years may be beneficial for perspective. Intrestingly the year of occurancy, perpetrator age group and victim age groups are the most significant variables to predict a murder or not for this model. Only one District, Manhattan, is significant.   
+
+Let's move on to creating a Random Forest model. 
+
+```{r Model Creation Continued: Random Forest, echo=FALSE, message=FALSE, warning=FALSE}
+
+rf <- randomForest(STATISTICAL_MURDER_FLAG~., data=train[,-1], proximity=TRUE)
+
+```
+```{r Finding the best number of features at each split, echo=FALSE, message=FALSE, warning=FALSE}
+print(rf)
+plot(rf)
+mtry <- tuneRF(train[,c(-1,-3)],train$STATISTICAL_MURDER_FLAG, ntreeTry=500,
+               stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+```
+
+
+```{r Apply Best mtry to RF Model, echo=FALSE, message=FALSE, warning=FALSE}
+rf <-randomForest(STATISTICAL_MURDER_FLAG~.,data=train[,-1], mtry=best.m, importance=TRUE,ntree=500)
+print(rf)
+#Evaluate variable importance
+importance(rf)
+varImpPlot(rf)
+```
+
+The random forest model had an accuracy of about 79.49%, as with the logistic regression model Occurance Year and  Perpetrator Age Group was vital. In contrast, Victim Age Group was low in importance. 
+
+Finally let's apply these models on our Testing data set, and compare the misclassification rates and ROC curves. 
+```{r Random Forest ROC, echo=FALSE, message=FALSE, warning=FALSE}
+pred1=predict(rf,test[,c(-1,-3)],type = "prob")
+MurderTF<-ifelse(test$STATISTICAL_MURDER_FLAG=="true",1,0)
+
+perf = prediction(pred1[,2], MurderTF)
+# 1. Area under curve
+auc = performance(perf, "auc")
+auc
+# 2. True Positive and Negative Rate
+pred3 = performance(perf, "tpr","fpr")
+# 3. Plot the ROC curve
+plot(pred3,main="ROC Curve for Random Forest",col=2,lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+```
+
+
+```{r Logistic Regression ROC, echo=FALSE, message=FALSE, warning=FALSE}
+predicted <- predict(model, test[,c(-1,-3)], type="response")
+murderTest <- ifelse(test$STATISTICAL_MURDER_FLAG=="true",1,0)
+
+perf2 = prediction(predicted, MurderTF)
+# 1. Area under curve
+auc = performance(perf2, "auc")
+auc
+# 2. True Positive and Negative Rate
+predLR = performance(perf2, "tpr","fpr")
+# 3. Plot the ROC curve
+plot(predLR,main="ROC Curve for Logistic Regression",col=2,lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+print("Misclassification Rate: Logistic Regression")
+round((1-mean(as.factor(round(predicted, digits=0)) == murderTest))*100,digits=2)
+print("Misclassification Rate: Random Forest")
+round((1-mean(as.factor(round(pred1[,2], digits=0)) == murderTest))*100,digits=2)
+```
+
+Both Models are very comparable in miscassification rate and ROC curves. Random Forest may be prefered as the data is more categorical than numeric and the model also tells us how much a variable contributes to accuracy as opposed to significance. Overall through this process we have developed a model that can predict if a incident will result in murder or not at about an 80.26% accuracy (from test). Some of the initial variables that were dropped may have been more useful, however because of their incompleteness and sparsity would drastically reduce the amount of observations.   
+
+Bias Identification:
+Because this data is limited in scope I think it would be beneficial to merge demographic data from the Districts of New York City to get a better picture of what is going on and if this data is representative of that District. Also compare this shooting data to other crimes. It would also be wise to look into why there is a good amount of missing data from specific Districts, the systems that collect the data, and people recording the incident data. I think some potential bias I have is as an outsider of New York and never visited New York City, seeing how the city is portrayed in media, news, etc. definitely paints the city in two extreme views. Some of my speculation may stem from my limited knowledge of the city and would benefit looking at related data and statisitics.  
